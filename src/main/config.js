@@ -7,6 +7,12 @@ const { app } = require('electron');
 const DEFAULTS = {
   scale: 0.6,        // sprite scale, 0.6 ≈ 250px tall
   muted: false,
+  speech: true,
+  speechProvider: 'windows',
+  elevenKeyEncrypted: '',
+  elevenVoice: '',
+  screenVision: false,
+  launchApps: [],
   volume: 0.7,
   lang: 'auto',      // 'auto' follows the system language, or 'fr' / 'en'
   displayId: null,   // null = primary display

@@ -9,6 +9,12 @@ const on = (channel) => (fn) => {
 };
 
 contextBridge.exposeInMainWorld('host', {
+  listen: () => ipcRenderer.invoke('microphone:listen'),
+  stopListening: () => ipcRenderer.send('microphone:stop'),
+  onMicrophoneReady: on('microphone:ready'),
+  speak: (text) => ipcRenderer.invoke('speech:say', { text }),
+  stopSpeech: () => ipcRenderer.send('speech:stop'),
+  configureSpeech: (settings) => ipcRenderer.invoke('speech:configure', settings),
   onClaudeEvent: on('claude:event'),
   onCommand: on('capri:command'),
   onConfig: on('capri:config'),

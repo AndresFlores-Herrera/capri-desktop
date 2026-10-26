@@ -3,6 +3,7 @@ import { FxLayer, GRAB_FRAMES } from './fx.js';
 import { Chip, Mask } from './chip.js';
 import { Panel } from './panel.js';
 import { Voice } from './voice.js';
+import { Dictation } from './dictation.js';
 import { Brain } from './brain.js';
 import { Guide } from './guide.js';
 import { Mission } from './mission.js';
@@ -89,6 +90,7 @@ async function boot() {
 
   const mission = new Mission();
   const brain = new Brain({ capri, panel, voice, host, mission, lang: config.lang, assistant: config.assistant });
+  brain.screenVision = config.screenVision === true;
 
   // Click-through everywhere except on her body, the panel and her biochip.
   let interactive = false;
@@ -200,6 +202,9 @@ async function boot() {
     else brain.status();
   };
   panel.onChar = (kind) => voice.play('blip', { mood: kind });
+  panel.onSpeech = (text) => voice.speak(text);
+  new Dictation({ panel, host, voice });
+  voice.onSpeechError = (error) => panel.setQuote(`Voz: ${error}`);
   panel.onTalk = (talking) => talking && capri.perform('talk');
   capri.onMenu = () => host.openMenu();
 
@@ -326,6 +331,9 @@ async function boot() {
 
   host.onConfig((cfg) => {
     voice.configure(cfg);
+    voice.stopSpeech();
+    panel.onMicCancel?.();
+    brain.screenVision = cfg.screenVision === true;
     capri.wander = cfg.wander;
     capri.possessWindows = cfg.possess;
     capri.restOn = cfg.rest || 'corner';
@@ -356,6 +364,20 @@ async function boot() {
   host.onCommand(async (cmd) => {
     const t = brain.t;
     switch (cmd.name) {
+      case 'stopVoice': voice.stopSpeech(); break;
+      case 'testVoice': voice.speak('Hola, soy Capri. Esta es mi voz.'); break;
+      case 'setupVoice':
+        guide.scene(async () => {
+          const key = await guide.askText({ line: 'Clave de ElevenLabs', quote: 'Se guarda cifrada en Windows. La voz usa créditos de ElevenLabs.', secret: true, placeholder: 'API key', send: 'Continuar', actions: [{ id: 'keep', label: 'Usar clave guardada' }] });
+          if (!key) return;
+          const selected = await guide.askText({ line: '¿Qué voz querés usar?', quote: 'Pegá el Voice ID de tu biblioteca de voces de ElevenLabs.', placeholder: 'Voice ID', send: 'Guardar' });
+          if (!selected || selected.action) return;
+          try {
+            await host.configureSpeech({ key: key.text || '', voice: selected.text.trim() });
+            panel.say({ kind: 'info', line: 'Voz de ElevenLabs configurada.', hold: 5000 });
+          } catch (err) { panel.say({ kind: 'error', line: 'No se pudo guardar la voz.', quote: err.message, hold: 10000 }); }
+        });
+        break;
       case 'teleport':
         capri.teleport(capri.spot('random'));
         break;

@@ -9,41 +9,62 @@ const path = require('node:path');
 const { spawn, execFile } = require('node:child_process');
 const { shell } = require('electron');
 const { powershell } = require('./apps');
+const config = require('./config');
 
 const WIN = process.platform === 'win32';
 // not things to open from a chat: uninstallers, help pages and the like
 const SKIP = /uninstall|désinstaller|desinstalar|deinstall|readme|documentation|release notes|support center|website|manual/i;
 const STEAM_SKIP = /redistributable|dedicated server|steamworks/i;
 // words that don't tell apps apart ("Roblox Player" is "roblox")
-const FILLER = new Set(['player', 'launcher', 'app', 'the', 'for', 'windows', 'desktop', 'client', 'x64', 'x86', 'beta']);
+const FILLER = new Set(['player', 'launcher', 'app', 'the', 'for', 'windows', 'desktop', 'client', 'x64', 'x86', 'beta', 'microsoft']);
 const CACHE_MS = 10 * 60 * 1000; // installed apps hardly change
 
 let cache = null; // { at, items }
+let loading = null;
+function invalidate() { cache = null; }
+function customApps() {
+  return (config.load().launchApps || []).filter((item) => item && typeof item.name === 'string' && typeof item.id === 'string' && path.isAbsolute(item.id) && /\.(exe|lnk)$/i.test(item.id) && fs.existsSync(item.id))
+    .map((item) => ({ name: item.name, id: item.id, kind: /\.lnk$/i.test(item.id) ? 'shortcut' : 'exe' }));
+}
 
 const plain = (text) => String(text || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
 const words = (text) => plain(text).split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 2);
 
 // Everything she can open: [{ name, kind: 'app' | 'steam' | 'epic', id }]
 async function launchables() {
-  if (cache && Date.now() - cache.at < CACHE_MS) return cache.items;
+  if (cache && Date.now() - cache.at < CACHE_MS) return [...customApps(), ...cache.items];
   if (!WIN) return [];
+  if (loading) return loading;
+  loading = discover().finally(() => { loading = null; });
+  return loading;
+}
+
+async function discover() {
   const items = [];
   const seen = new Set();
   const add = (item) => {
     const key = words(item.name).join(' ');
-    if (!key || seen.has(key) || SKIP.test(item.name)) return;
+    if (!key || SKIP.test(item.name)) return;
+    if (seen.has(key)) {
+      const previous = items.find((i) => words(i.name).join(' ') === key);
+      if (previous) previous.aliases = [...new Set([...(previous.aliases || []), ...(item.aliases || [])])];
+      return;
+    }
     seen.add(key);
     items.push(item);
   };
   // games first: a game's own entry wins over a shortcut to it
   for (const game of [...steamGames(await steamRoot()), ...epicGames()]) add(game);
   // the Start menu's list is slow the first time (PowerShell starting cold): main.js asks for it early
-  const out = await powershell('Get-StartApps | Select-Object Name, AppID | ConvertTo-Json -Compress', 45000).catch(() => null);
-  for (const { Name, AppID } of [].concat(out ? JSON.parse(out) : [])) {
-    if (Name && AppID && !/^https?:/i.test(AppID)) add({ name: Name, kind: 'app', id: AppID });
+  const out = await powershell(fs.readFileSync(path.join(__dirname, 'installed-apps.ps1'), 'utf8'), 45000).catch(() => null);
+  let rows = [];
+  let parsed = false;
+  try { rows = [].concat(out ? JSON.parse(out) : []); parsed = Boolean(out); } catch { /* retry next lookup */ }
+  for (const item of rows) {
+    if (item?.name && item.id && ['app', 'shortcut', 'exe'].includes(item.kind)) add(item);
   }
-  if (out !== null) cache = { at: Date.now(), items }; // a list that failed isn't kept: next time, again
-  return items;
+  if (parsed) cache = { at: Date.now(), items };
+  return [...customApps(), ...items];
 }
 
 function steamRoot() {
@@ -113,20 +134,42 @@ function epicGames() {
 // name in it, else at least half of them; the closest wins. null if nothing fits well enough.
 function match(items, text) {
   const said = new Set(words(text));
-  const joined = words(text).join('');
-  let best = null;
+  const ranked = [];
   for (const item of items) {
-    const key = words(item.name).filter((w) => !FILLER.has(w));
-    if (!key.length) continue;
-    const hits = key.filter((w) => said.has(w) || (w.length >= 5 && joined.includes(w)));
-    if (!hits.some((w) => w.length >= 3) || hits.length / key.length < 0.5) continue;
-    const rank = (hits.length / key.length) * 10 + hits.join('').length / 10;
-    if (!best || rank > best.rank) best = { item, rank };
+    let rank = 0;
+    for (const name of [item.name, ...(item.aliases || []), ...knownAliases(item.name)]) {
+      const key = words(name).filter((w) => !FILLER.has(w) && !/^20\d{2}$/.test(w));
+      if (!key.length) continue;
+      const hits = key.filter((w) => said.has(w));
+      const compact = key.join('');
+      const exact = words(text).join('') === words(name).join('');
+      const complete = hits.length === key.length || (said.has(compact) && compact.length >= 3);
+      if (!complete && (hits.length < 2 || hits.length / key.length < 0.75)) continue;
+      rank = Math.max(rank, (exact ? 100 : complete ? 50 : 20) + hits.join('').length / 100);
+    }
+    if (rank) ranked.push({ item, rank });
   }
-  return best?.item || null;
+  ranked.sort((a, b) => b.rank - a.rank);
+  if (!ranked.length) return null;
+  if (ranked[1] && Math.abs(ranked[0].rank - ranked[1].rank) < 0.01 && plain(ranked[0].item.name) !== plain(ranked[1].item.name)) return null;
+  return ranked[0].item;
+}
+
+function knownAliases(name) {
+  const groups = [
+    ['visual studio code', 'vs code', 'vscode'], ['google chrome', 'chrome'],
+    ['microsoft edge', 'edge'], ['mozilla firefox', 'firefox'],
+    ['microsoft word', 'word'], ['microsoft excel', 'excel'],
+    ['microsoft powerpoint', 'powerpoint'], ['notepad', 'bloc de notas'],
+    ['calculator', 'calculadora'], ['file explorer', 'explorador de archivos'],
+  ];
+  return groups.find((group) => group.includes(words(name).join(' '))) || [];
 }
 
 async function find(text) {
+  const item = match(await launchables(), text);
+  if (item) return item;
+  invalidate();
   return match(await launchables(), text);
 }
 
@@ -137,7 +180,16 @@ async function launch({ kind, id } = {}) {
   if (!item) throw new Error('not found');
   if (kind === 'steam') return shell.openExternal(`steam://rungameid/${id}`);
   if (kind === 'epic') return shell.openExternal(`com.epicgames.launcher://apps/${encodeURIComponent(id)}?action=launch&silent=true`);
-  spawn('explorer.exe', [`shell:AppsFolder\\${id}`], { detached: true, stdio: 'ignore' }).on('error', () => {}).unref();
+  if (kind === 'exe' || kind === 'shortcut') {
+    const error = await shell.openPath(item.id);
+    if (error) throw new Error(error);
+    return;
+  }
+  await new Promise((resolve, reject) => {
+    const child = spawn('explorer.exe', [`shell:AppsFolder\\${item.id}`], { detached: true, stdio: 'ignore' });
+    child.once('error', reject);
+    child.once('spawn', () => { child.unref(); resolve(); });
+  });
   return undefined;
 }
 
@@ -181,4 +233,4 @@ async function site(address) {
   return true;
 }
 
-module.exports = { launchables, match, find, launch, media, music, site, siteUrl };
+module.exports = { launchables, match, find, launch, media, music, site, siteUrl, invalidate };

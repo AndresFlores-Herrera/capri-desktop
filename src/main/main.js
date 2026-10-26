@@ -7,9 +7,13 @@ const { pathToFileURL } = require('node:url');
 const {
   app, BrowserWindow, Tray, Menu, ipcMain, screen, protocol, net, shell, globalShortcut, nativeImage,
   clipboard, ClipboardItem, dialog, powerMonitor,
+  safeStorage, desktopCapturer,
 } = require('electron');
 
 const config = require('./config');
+const speech = require('./speech');
+const microphone = require('./listen');
+const { attachScreen } = require('./vision');
 const { TRAY, LANGS } = require('./labels');
 const { createBridge } = require('./bridge');
 const { startWindowWatch } = require('./windows');
@@ -167,8 +171,11 @@ function createOverlay() {
     overlay.showInactive();
   });
   overlay.webContents.on('render-process-gone', (_e, details) => {
+    microphone.stop();
     console.error('[capri] renderer gone:', details.reason);
   });
+  overlay.webContents.on('destroyed', () => microphone.stop());
+  overlay.webContents.on('did-start-navigation', () => microphone.stop());
   if (DEV) {
     overlay.webContents.on('console-message', (e) => {
       const { level, message, lineNumber, sourceId } = e;
@@ -242,11 +249,12 @@ function resolveLang(setting) {
 
 // What the overlay gets: `lang` is the resolved one, `langSetting` what the user picked.
 function rendererConfig() {
-  const { apiKeys, ...cfg } = config.load(); // the keys stay here: the overlay only learns which ones are set
+  const { apiKeys, elevenKeyEncrypted, ...cfg } = config.load(); // secrets stay in the main process
   return { ...cfg, keys: Object.keys(apiKeys || {}), assistant: activeAssistant().id, lang: resolveLang(cfg.lang), langSetting: cfg.lang, floorGap: overlayArea().gap };
 }
 
 function updateConfig(patch) {
+  speech.stop();
   config.save(patch);
   if ('rest' in patch) fitOverlay(); // the taskbar in her window or not
   const cfg = rendererConfig();
@@ -276,6 +284,42 @@ function rebuildTray() {
     ...(cfg.claude ? [{ label: t.report, click: () => sendCommand('report') }] : []),
     { label: t.talk, click: () => sendCommand('chat') },
     { label: t.custom, click: () => sendCommand('customize') },
+    { label: 'Voz', submenu: [
+      { label: 'Leer mensajes en voz alta', type: 'checkbox', checked: cfg.speech !== false, click: (item) => updateConfig({ speech: item.checked }) },
+      ...[['windows', 'Windows (local)'], ['elevenlabs', 'ElevenLabs']].map(([value, label]) => ({ label, type: 'radio', checked: cfg.speechProvider === value, click: () => updateConfig({ speechProvider: value }) })),
+      { label: 'Configurar ElevenLabs…', click: () => sendCommand('setupVoice') },
+      { label: 'Probar voz', click: () => sendCommand('testVoice') },
+      { label: 'Volumen', submenu: [0.25, 0.5, 0.75, 1].map((volume) => ({ label: `${volume * 100}%`, type: 'radio', checked: Math.abs(cfg.volume - volume) < 0.01, click: () => updateConfig({ volume }) })) },
+      { label: 'Detener voz', click: () => { speech.stop(); sendCommand('stopVoice'); } },
+    ] },
+    { label: 'Ojos · ver pantalla', submenu: [
+      { label: 'Adjuntar pantalla a mis mensajes', type: 'checkbox', checked: cfg.screenVision === true, click: async (item) => {
+        if (item.checked) {
+          const { response } = await dialog.showMessageBox({ type: 'info', title: 'Ojos de Capri', message: 'Capri capturará la pantalla seleccionada al enviar cada mensaje.', detail: 'La captura se envía al proveedor de IA del chat. Necesitás un modelo con visión. Las capturas no se guardan en el historial. Podés desactivarlo desde este menú.', buttons: ['Activar', 'Cancelar'], defaultId: 1, cancelId: 1 });
+          if (response !== 0) { rebuildTray(); return; }
+        }
+        updateConfig({ screenVision: item.checked });
+      } },
+    ] },
+    { label: 'Aplicaciones', submenu: [
+      { label: 'Agregar aplicación…', click: async () => {
+        const selected = await dialog.showOpenDialog({ title: 'Elegí una aplicación o un acceso directo', properties: ['openFile'], filters: [{ name: 'Aplicaciones de Windows', extensions: ['exe', 'lnk'] }] });
+        if (selected.canceled || !selected.filePaths[0]) return;
+        const id = selected.filePaths[0];
+        if (!/\.(exe|lnk)$/i.test(id)) return;
+        const name = path.basename(id, path.extname(id));
+        const entries = config.load().launchApps || [];
+        updateConfig({ launchApps: [...entries.filter((entry) => entry.id.toLowerCase() !== id.toLowerCase()), { name, id }] });
+        launch.invalidate();
+        await dialog.showMessageBox({ type: 'info', message: `Aplicación agregada: ${name}`, detail: `Ahora podés pedirle a Capri: «Abrí ${name}».` });
+      } },
+      { label: 'Actualizar lista de aplicaciones', click: async () => {
+        launch.invalidate();
+        try { const items = await launch.launchables(); await dialog.showMessageBox({ type: 'info', message: `${items.length} aplicaciones y juegos disponibles.` }); }
+        catch { await dialog.showMessageBox({ type: 'error', message: 'No se pudo actualizar la lista de aplicaciones.' }); }
+      } },
+      ...((cfg.launchApps || []).length ? [{ label: 'Quitar aplicación agregada', submenu: cfg.launchApps.map((entry) => ({ label: entry.name, click: () => { updateConfig({ launchApps: cfg.launchApps.filter((item) => item.id !== entry.id) }); launch.invalidate(); } })) }] : []),
+    ] },
     { label: cfg.visible ? t.hide : t.show, accelerator: 'Ctrl+Alt+C', click: () => toggleVisible() },
     { type: 'separator' },
     {
@@ -499,6 +543,28 @@ function registerIpc() {
     return { x: p.x - b.x, y: p.y - b.y, inside: p.x >= b.x && p.y >= b.y && p.x < b.x + b.width && p.y < b.y + b.height };
   });
   ipcMain.handle('config:get', () => rendererConfig());
+  ipcMain.handle('speech:say', async (_e, request) => {
+    try { return await speech.speak(request, { ...config.load(), lang: rendererConfig().lang }); }
+    catch (err) { return { error: err.message }; }
+  });
+  ipcMain.on('speech:stop', () => speech.stop());
+  ipcMain.handle('microphone:listen', async (event) => {
+    if (event.sender !== overlay?.webContents) return { error: 'Sesión no válida.' };
+    speech.stop();
+    return microphone.listen(rendererConfig().lang, () => {
+      if (!event.sender.isDestroyed()) event.sender.send('microphone:ready');
+    });
+  });
+  ipcMain.on('microphone:stop', () => microphone.stop());
+  ipcMain.handle('speech:configure', (_e, { key, voice }) => {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows no permite cifrar la clave en este momento.');
+    if (typeof voice !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(voice)) throw new Error('Ingresá un Voice ID válido.');
+    const patch = { elevenVoice: voice, speechProvider: 'elevenlabs' };
+    if (typeof key === 'string' && key.trim()) patch.elevenKeyEncrypted = safeStorage.encryptString(key.trim()).toString('base64');
+    if (!patch.elevenKeyEncrypted && !config.load().elevenKeyEncrypted) throw new Error('Falta la API key de ElevenLabs.');
+    updateConfig(patch);
+    return { ok: true };
+  });
   ipcMain.handle('hooks:status', () => activeHooks().status());
   ipcMain.handle('config:set', (_e, patch) => updateConfig(patch));
   ipcMain.handle('demo:window', (_e, open) => demoWindow(open));
@@ -530,6 +596,7 @@ function registerIpc() {
         overlay?.webContents.send('chat:delta', { id, text });
       };
       const cfg = config.load();
+      if (cfg.screenVision) messages = await attachScreen(messages, { provider: cfg.provider, displayId: targetDisplay().id, capturer: desktopCapturer, signal: abort.signal });
       const text = await chatWithFallback(cfg, messages, send, abort.signal, () => streamed);
       if (cfg.provider === 'claude') saveMemory({ claude: llm.claudeMemory() });
       return { ok: true, text };
@@ -767,6 +834,8 @@ function main() {
   });
 
   app.on('will-quit', () => {
+    microphone.stop();
+    speech.stop();
     globalShortcut.unregisterAll();
     windowWatch?.stop();
   });

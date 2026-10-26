@@ -727,6 +727,11 @@ html[data-motion='reduced'] .panel__bar {
   flex: none;
 }
 
+.panel__mic { padding-inline: 9px; }
+.panel__mic[aria-pressed="true"] { background: #b91c3c; color: #fff; }
+.panel__mic:focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; }
+.panel__mic-status { margin: 7px 0 0; color: var(--paper); font: 11px var(--font-mono); }
+
 .panel__chat .panel__action:disabled {
   background: var(--ink-2);
   color: var(--paper-3);

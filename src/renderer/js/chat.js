@@ -27,7 +27,7 @@ const CLOSE_ASK = /\b(close|shut|quit|kill|exit)|ferm|quitt|coupe|arr[êe]t|cier
 // her other tags: [[open: Spotify]], [[music: Bad Bunny]], [[media: next]], [[site: youtube.com]]
 const TAG = /\[\[\s*(open|music|media|site)\s*:\s*([^\]]*)\]\]/i;
 // "open", "launch", "ouvre", "lance", "abre", "открой"... in any of her languages
-const OPEN_ASK = /\b(open|launch|start|run)\b|ouvr|lance|démarre|abre|abrir|inicia|ejecuta|executa|открой|запусти/i;
+const OPEN_ASK = /\b(open|launch|start|run)\b|ouvr|lance|démarre|abr[ií]|abre|inicia|ejecuta|executa|открой|запусти/i;
 // what to do with the music playing, said plainly (only when it's about music, or said in a few words)
 const MEDIA_ASK = [
   ['pause', /\b(pause|pausa|pausar)\b|stop (the )?music|arrête la musique|пауз/i],
@@ -140,7 +140,7 @@ export class Chat {
         send: t.send,
         close: t.close,
         noteTag: t.noteTag,
-        note: status.local ? t.note : t.noteCloud,
+        note: (status.local ? t.note : t.noteCloud) + (this.brain.screenVision ? ' · Ojos activos: se adjunta una captura al enviar cada mensaje.' : ''),
       },
       onSend: (text) => this.send(text),
       onLeave: () => this.close(),
@@ -157,6 +157,7 @@ export class Chat {
   }
 
   close() {
+    this.voice.stopSpeech();
     if (!this.open) return;
     this.open = false;
     if (this.turn) this.host.chatStop(this.turn);
@@ -168,6 +169,7 @@ export class Chat {
 
   async send(text) {
     if (this.turn || !this.open) return;
+    this.voice.stopSpeech();
     const id = Date.now();
     this.turn = id;
     this.answer = '';
@@ -239,7 +241,7 @@ export class Chat {
     if (song) return { kind: 'music', song };
     const app = this.askedToClose(text);
     if (app) return { kind: 'close', name: app };
-    if (OPEN_ASK.test(text) && count <= 8) return { kind: 'open', text };
+    if (OPEN_ASK.test(text) && count <= 20) return { kind: 'open', text };
     return null;
   }
 
@@ -421,7 +423,7 @@ export class Chat {
       const open = this.apps.map(({ name, label }) => (label && label !== name ? `${name} (${label})` : name)).join(', ');
       lines.push(`You can also close an app that's open, only when they ask you to: end your answer with [[close: NAME]], NAME being the exact name from this list (the part before the parentheses). They get a button to confirm it. Apps open right now: ${open}.`);
     }
-    lines.push('Apart from that, you can\'t see the user\'s screen or files, and you can\'t touch anything else on their PC (settings, files): if asked, say plainly that you can\'t, in character, and don\'t pretend to.');
+    lines.push('You cannot read files or change PC settings. You can see the screen only when a screenshot is attached to the current message; otherwise say you cannot see it. Never pretend to have screen control.');
     return lines;
   }
 

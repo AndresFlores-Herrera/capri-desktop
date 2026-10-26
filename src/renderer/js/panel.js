@@ -52,6 +52,7 @@ export class Panel {
     this.view = { w: innerWidth, h: innerHeight };
     this.onChar = null;    // (mood) => void, for the voice blips
     this.onTalk = null;    // (talking: boolean) => void
+    this.onSpeech = null;
     this.suspended = false;
     this.tickerAction = null;
     this.tickerShownAt = 0;
@@ -63,12 +64,16 @@ export class Panel {
     this.chatInput = panel.querySelector('.panel__input');
     this.chatSend = panel.querySelector('.panel__send');
     this.chatClose = panel.querySelector('.panel__close');
+    this.chatMic = panel.querySelector('.panel__mic');
+    this.micStatus = panel.querySelector('.panel__mic-status');
+    this.onMicCancel = null;
     this.note = panel.querySelector('.panel__note');
     this.chatForm.addEventListener('click', (e) => e.stopPropagation());
     this.chatForm.addEventListener('submit', (e) => {
       e.preventDefault();
       const text = this.chatInput.value.trim();
       if (!text || this.chatInput.disabled) return;
+      this.onMicCancel?.();
       this.chatInput.value = '';
       this.current?.onSend?.(text);
     });
@@ -153,6 +158,7 @@ export class Panel {
     this.replayEnter();
     this.place();
     this.decode(msg.line || '', msg.kind);
+    this.onSpeech?.([msg.line, msg.guide ? msg.quote : null].filter(Boolean).join('. '));
 
     if (msg.hold) this.hideTimer = setTimeout(() => this.hide(), msg.hold);
     return true;
@@ -275,6 +281,10 @@ export class Panel {
   }
 
   renderChat(chat) {
+    this.onMicCancel?.();
+    this.chatMic.hidden = !chat || Boolean(chat.secret) || Boolean(this.current?.guide);
+    this.chatMic.disabled = false;
+    this.micStatus.hidden = true;
     this.el.classList.toggle('is-chat', Boolean(chat));
     this.line.classList.remove('is-streaming');
     this.chatForm.hidden = !chat;
@@ -313,6 +323,7 @@ export class Panel {
   // up faster the further behind it is (Claude Code's answer comes in one piece), and glitches once done.
   stream(text, { done = false } = {}) {
     if (!this.current?.chat) return;
+    if (done) this.onSpeech?.(text);
     this.streamTo = [...text];
     this.streamDone = done;
     // an answer rewritten rather than added to (a reasoning block cut out, an error): from where they part
@@ -368,6 +379,8 @@ export class Panel {
 
   // While she answers you can't send another.
   setChatBusy(busy) {
+    if (busy) this.onMicCancel?.();
+    this.chatMic.disabled = busy;
     this.chatInput.disabled = busy;
     this.chatSend.disabled = busy;
     if (!busy && this.current?.chat) this.chatInput.focus();
@@ -429,6 +442,7 @@ export class Panel {
   }
 
   hide() {
+    this.onMicCancel?.();
     clearTimeout(this.hideTimer);
     clearInterval(this.decodeTimer);
     this.stopStream();

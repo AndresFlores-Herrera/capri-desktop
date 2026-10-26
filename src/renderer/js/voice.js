@@ -18,6 +18,8 @@ export class Voice {
     this.volume = 0.7;
     this.custom = new Map(); // cue -> AudioBuffer
     this.lastBlip = 0;
+    this.speechId = 0;
+    this.speechAudio = null;
   }
 
   ensure() {
@@ -39,11 +41,13 @@ export class Voice {
     return ctx;
   }
 
-  configure({ muted, volume }) {
+  configure({ muted, volume, speech }) {
     if (typeof muted === 'boolean') this.muted = muted;
+    if (this.muted || speech === false || volume === 0) this.stopSpeech();
     if (typeof volume === 'number') {
       this.volume = volume;
       if (this.master) this.master.gain.value = volume;
+      if (this.speechAudio) this.speechAudio.volume = Math.max(0, Math.min(1, volume));
     }
   }
 
@@ -58,6 +62,37 @@ export class Voice {
       } catch (err) {
         console.warn('[capri] could not load sound', name, err);
       }
+    }
+  }
+
+  stopSpeech() {
+    this.speechId++;
+    this.speechAudio?.pause();
+    this.speechAudio = null;
+    window.host.stopSpeech();
+  }
+
+  async speak(text) {
+    this.stopSpeech();
+    if (!text || this.muted) return;
+    const id = this.speechId;
+    try {
+      const result = await window.host.speak(text);
+      if (id !== this.speechId) return;
+      if (result?.error) throw new Error(result.error);
+      if (!result?.audio) return;
+      const bytes = Uint8Array.from(atob(result.audio), (c) => c.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }));
+      const audio = new Audio(url);
+      this.speechAudio = audio;
+      audio.volume = Math.max(0, Math.min(1, this.volume));
+      const release = () => { URL.revokeObjectURL(url); if (this.speechAudio === audio) this.speechAudio = null; };
+      for (const event of ['ended', 'pause', 'error']) audio.addEventListener(event, release, { once: true });
+      try { await audio.play(); } catch (err) { release(); throw err; }
+    } catch (err) {
+      if (id !== this.speechId) return;
+      console.warn('[capri] voz:', err.message);
+      this.onSpeechError?.(err.message);
     }
   }
 
